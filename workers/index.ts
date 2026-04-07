@@ -1,13 +1,13 @@
 import { Worker, Job } from 'bullmq';
 import IORedis from 'ioredis';
 import { query } from '../lib/db';
-import { generateDomains, generateSlug } from '../lib/domainGen';
+import { generateDomains, generateSlug, isCompanyName } from '../lib/domainGen';
 import { checkDomain } from '../lib/whois';
 import { sendBatchAlert } from '../lib/telegram';
 import { sendNtfyBatchAlert } from '../lib/ntfy';
 import { EdiktsdateiScraper } from '../scrapers/ediktsdatei';
 import { GisaScraper } from '../scrapers/gisa';
-import { enrichCompany } from '../scrapers/wko';
+import { enrichCompany, searchCompanyDomain } from '../scrapers/wko';
 import { setupScheduler } from '../lib/queue';
 import { scoreDomainBatch } from '../lib/domainScore';
 
@@ -84,23 +84,25 @@ async function runScraperJob(
       const dissolutionId = insertResult.rows[0].id;
       newCount++;
 
-      // 4. Generate domains
-      const domains = generateDomains(r.company_name);
+      // 4. Only generate domains for companies (not natural persons)
+      const companyFlag = r.raw_data?.is_company ?? isCompanyName(r.company_name);
+      if (companyFlag) {
+        // Generate domain variants from the brand name
+        const domains = generateDomains(r.company_name);
+        for (const domain of domains) {
+          const tld = domain.substring(domain.indexOf('.'));
+          await query(
+            `INSERT INTO domains (dissolution_id, domain, tld)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (domain) DO NOTHING`,
+            [dissolutionId, domain, tld]
+          );
+        }
 
-      // 5. Insert domains (skip duplicates)
-      for (const domain of domains) {
-        const tld = domain.substring(domain.indexOf('.'));
-        await query(
-          `INSERT INTO domains (dissolution_id, domain, tld)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (domain) DO NOTHING`,
-          [dissolutionId, domain, tld]
-        );
+        // Queue WKO enrichment to find the actual company website/domain
+        const { enrichWKOQueue } = await import('../lib/queue');
+        await enrichWKOQueue.add('enrich', { dissolution_id: dissolutionId });
       }
-
-      // 6. Queue enrichWKO job
-      const { enrichWKOQueue } = await import('../lib/queue');
-      await enrichWKOQueue.add('enrich', { dissolution_id: dissolutionId });
     }
 
     // 7. Update scraper_runs
@@ -171,7 +173,6 @@ const enrichWorker = new Worker(
   async (job: Job<{ dissolution_id: number }>) => {
     const { dissolution_id } = job.data;
 
-    // 1. Fetch company_name
     const result = await query(
       `SELECT company_name FROM dissolutions WHERE id = $1`,
       [dissolution_id]
@@ -183,16 +184,34 @@ const enrichWorker = new Worker(
 
     const companyName = result.rows[0].company_name;
 
-    // 2. Call enrichCompany
+    // 1. Try WKO directory
     const enrichment = await enrichCompany(companyName);
 
-    // 3. Update dissolutions
+    // 2. If WKO didn't find a domain, try web search
+    let domain = enrichment.domain;
+    if (!domain) {
+      domain = await searchCompanyDomain(companyName);
+    }
+
+    // 3. Update dissolutions with website
     await query(
       `UPDATE dissolutions SET existing_website = $1, enriched_at = NOW() WHERE id = $2`,
       [enrichment.existing_website, dissolution_id]
     );
 
-    console.log(`[enrichWKO] Enriched dissolution #${dissolution_id}: website=${enrichment.existing_website ?? 'none'}`);
+    // 4. If we found an actual domain, add it to the domains table
+    if (domain) {
+      const tld = '.' + domain.split('.').slice(1).join('.');
+      await query(
+        `INSERT INTO domains (dissolution_id, domain, tld)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (domain) DO NOTHING`,
+        [dissolution_id, domain, tld]
+      );
+      console.log(`[enrichWKO] #${dissolution_id} "${companyName}": found domain ${domain}`);
+    } else {
+      console.log(`[enrichWKO] #${dissolution_id} "${companyName}": no domain found`);
+    }
   },
   {
     connection,
