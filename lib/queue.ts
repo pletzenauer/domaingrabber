@@ -75,37 +75,38 @@ export const sendAlertsQueue = { get add() { return getSendAlertsQueue().add.bin
 // --- Scheduler setup ---
 
 export async function setupScheduler(): Promise<void> {
+  // All scrapers run every 6 hours
   await getScrapeEdiktsdateiQueue().upsertJobScheduler(
-    'scrapeEdiktsdatei-daily',
-    { pattern: '0 8 * * *', tz: 'Europe/Vienna' },
+    'scrapeEdiktsdatei-periodic',
+    { pattern: '0 */6 * * *', tz: 'Europe/Vienna' },
     { name: 'scrapeEdiktsdatei', data: {} }
   );
 
   await getScrapeGISAQueue().upsertJobScheduler(
-    'scrapeGISA-weekly',
-    { pattern: '0 2 * * 0', tz: 'Europe/Vienna' },
+    'scrapeGISA-periodic',
+    { pattern: '10 */6 * * *', tz: 'Europe/Vienna' },
     { name: 'scrapeGISA', data: {} }
   );
 
   await getCheckWhoisQueue().upsertJobScheduler(
     'checkWhois-periodic',
-    { pattern: '0 */6 * * *', tz: 'Europe/Vienna' },
+    { pattern: '20 */6 * * *', tz: 'Europe/Vienna' },
     { name: 'checkWhois', data: {} }
   );
 
   await getScoreDomainQueue().upsertJobScheduler(
     'scoreDomain-periodic',
-    { pattern: '0 */12 * * *', tz: 'Europe/Vienna' },
+    { pattern: '30 */6 * * *', tz: 'Europe/Vienna' },
     { name: 'scoreDomain', data: {} }
   );
 
   await getSendAlertsQueue().upsertJobScheduler(
     'sendAlerts-periodic',
-    { pattern: '*/30 * * * *', tz: 'Europe/Vienna' },
+    { pattern: '45 */6 * * *', tz: 'Europe/Vienna' },
     { name: 'sendAlerts', data: {} }
   );
 
-  console.log('Job schedulers configured successfully');
+  console.log('Job schedulers configured: all jobs every 6 hours');
 }
 
 export { getConnection as getRedisConnection };

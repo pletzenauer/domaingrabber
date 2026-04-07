@@ -6,6 +6,9 @@ interface Settings {
   telegram_bot_token: string;
   telegram_chat_id: string;
   telegram_enabled: boolean;
+  ntfy_url: string;
+  ntfy_topic: string;
+  ntfy_enabled: boolean;
   scraper_ediktsdatei_enabled: boolean;
   scraper_firmenbuch_enabled: boolean;
   scraper_wko_enabled: boolean;
@@ -28,6 +31,9 @@ const defaultSettings: Settings = {
   telegram_bot_token: '',
   telegram_chat_id: '',
   telegram_enabled: false,
+  ntfy_url: 'https://ntfy.sh',
+  ntfy_topic: '',
+  ntfy_enabled: false,
   scraper_ediktsdatei_enabled: true,
   scraper_firmenbuch_enabled: true,
   scraper_wko_enabled: true,
@@ -39,27 +45,33 @@ const defaultSettings: Settings = {
 
 const scraperJobs: ScraperJob[] = [
   {
-    name: 'ediktsdatei',
+    name: 'scrapeEdiktsdatei',
     label: 'Ediktsdatei Scraper',
     description: 'Scrape Austrian court edicts for company dissolutions',
     settingKey: 'scraper_ediktsdatei_enabled',
   },
   {
-    name: 'firmenbuch',
-    label: 'Firmenbuch Scraper',
-    description: 'Scrape Austrian company register for dissolution entries',
+    name: 'scrapeGISA',
+    label: 'GISA Gewerberegister',
+    description: 'Scrape GISA open data for expired/dormant trade licenses',
     settingKey: 'scraper_firmenbuch_enabled',
   },
   {
-    name: 'wko',
-    label: 'WKO Scraper',
-    description: 'Scrape WKO for company deregistration notices',
+    name: 'checkWhois',
+    label: 'WHOIS Checker',
+    description: 'Check domain WHOIS/RDAP data for expiry and availability',
+    settingKey: 'whois_check_enabled',
+  },
+  {
+    name: 'scoreDomain',
+    label: 'SEO Scorer',
+    description: 'Score domains for backlinks, authority, and SEO value',
     settingKey: 'scraper_wko_enabled',
   },
   {
-    name: 'whois',
-    label: 'WHOIS Checker',
-    description: 'Check domain WHOIS data for expiry and availability',
+    name: 'sendAlerts',
+    label: 'Send Alerts',
+    description: 'Send alerts (Telegram + ntfy) for available/expiring domains',
     settingKey: 'whois_check_enabled',
   },
 ];
@@ -247,6 +259,45 @@ export default function SettingsPage() {
                 value={settings.telegram_chat_id}
                 onChange={(e) => updateSetting('telegram_chat_id', e.target.value)}
                 placeholder="-1001234567890"
+                className="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-sm text-dark-text font-mono placeholder-dark-muted focus:border-accent"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ntfy Configuration */}
+      <div className="bg-dark-card border border-dark-border rounded-lg p-5 mb-6">
+        <h2 className="font-sans font-semibold text-sm mb-4">ntfy Push Notifications</h2>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Enable ntfy</p>
+              <p className="text-xs text-dark-muted">Send push notifications via ntfy.sh or self-hosted ntfy</p>
+            </div>
+            <Toggle
+              enabled={settings.ntfy_enabled}
+              onChange={(val) => updateSetting('ntfy_enabled', val)}
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs text-dark-muted mb-1">Server URL</label>
+              <input
+                type="text"
+                value={settings.ntfy_url}
+                onChange={(e) => updateSetting('ntfy_url', e.target.value)}
+                placeholder="https://ntfy.sh"
+                className="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-sm text-dark-text font-mono placeholder-dark-muted focus:border-accent"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-dark-muted mb-1">Topic</label>
+              <input
+                type="text"
+                value={settings.ntfy_topic}
+                onChange={(e) => updateSetting('ntfy_topic', e.target.value)}
+                placeholder="domainwatch-alerts"
                 className="w-full px-3 py-2 bg-dark-bg border border-dark-border rounded text-sm text-dark-text font-mono placeholder-dark-muted focus:border-accent"
               />
             </div>

@@ -4,6 +4,7 @@ import { query } from '../lib/db';
 import { generateDomains, generateSlug } from '../lib/domainGen';
 import { checkDomain } from '../lib/whois';
 import { sendBatchAlert } from '../lib/telegram';
+import { sendNtfyBatchAlert } from '../lib/ntfy';
 import { EdiktsdateiScraper } from '../scrapers/ediktsdatei';
 import { GisaScraper } from '../scrapers/gisa';
 import { enrichCompany } from '../scrapers/wko';
@@ -297,14 +298,17 @@ const alertsWorker = new Worker(
     const domains = result.rows;
     console.log(`[sendAlerts] Sending alerts for ${domains.length} domains...`);
 
-    // 2. Send telegram batch alert
-    await sendBatchAlert(
-      domains.map((d) => ({
-        domain: d.domain,
-        status: d.status,
-        expiry_date: d.expiry_date,
-      }))
-    );
+    // 2. Send alerts (Telegram + ntfy)
+    const alertPayload = domains.map((d) => ({
+      domain: d.domain,
+      status: d.status,
+      expiry_date: d.expiry_date,
+    }));
+
+    await Promise.allSettled([
+      sendBatchAlert(alertPayload),
+      sendNtfyBatchAlert(alertPayload),
+    ]);
 
     // 3. Log to alert_log and mark alert_sent
     for (const d of domains) {
