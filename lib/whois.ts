@@ -10,6 +10,12 @@ export interface DomainCheckResult {
   rdap_raw: string | null;
 }
 
+export interface HttpCheckResult {
+  is_online: boolean;
+  http_status: number | null;
+  redirect_url: string | null;
+}
+
 // Rate limiting: track last request timestamp per TLD
 const lastRequestTime: Record<string, number> = {};
 const MIN_GAP_MS = 1100; // slightly over 1 second
@@ -279,4 +285,45 @@ export async function checkDomain(domain: string): Promise<DomainCheckResult> {
     return checkRDAP(domain);
   }
   return checkWHOIS(domain);
+}
+
+/**
+ * Check if a domain has a live website by making an HTTP request.
+ * Returns whether the domain is online, the HTTP status, and any redirect URL.
+ */
+export async function checkDomainOnline(domain: string): Promise<HttpCheckResult> {
+  // Try HTTPS first, then HTTP
+  for (const proto of ['https', 'http']) {
+    try {
+      const resp = await axios.get(`${proto}://${domain}`, {
+        timeout: 8_000,
+        maxRedirects: 5,
+        validateStatus: () => true, // Accept any HTTP status
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; AustrianDomainWatch/1.0)',
+        },
+      });
+
+      const finalUrl = resp.request?.res?.responseUrl || resp.config?.url || null;
+      const redirected = finalUrl && !finalUrl.includes(domain) ? finalUrl : null;
+
+      return {
+        is_online: resp.status < 500,
+        http_status: resp.status,
+        redirect_url: redirected,
+      };
+    } catch (err) {
+      // HTTPS failed, try HTTP next
+      if (proto === 'https') continue;
+
+      // Both failed — domain is offline
+      return {
+        is_online: false,
+        http_status: null,
+        redirect_url: null,
+      };
+    }
+  }
+
+  return { is_online: false, http_status: null, redirect_url: null };
 }

@@ -16,6 +16,9 @@ interface Domain {
   page_rank?: number;
   seo_score?: number;
   scored_at?: string;
+  is_online?: boolean;
+  http_status?: number;
+  redirect_url?: string;
 }
 
 interface PaginatedResponse {
@@ -164,6 +167,7 @@ export default function DomainsPage() {
                 <th className="text-left p-3 text-xs font-medium text-dark-muted uppercase tracking-wider">Domain</th>
                 <th className="text-left p-3 text-xs font-medium text-dark-muted uppercase tracking-wider hidden sm:table-cell">TLD</th>
                 <th className="text-left p-3 text-xs font-medium text-dark-muted uppercase tracking-wider">Status</th>
+                <th className="text-left p-3 text-xs font-medium text-dark-muted uppercase tracking-wider hidden sm:table-cell">Online</th>
                 <th className="text-left p-3 text-xs font-medium text-dark-muted uppercase tracking-wider hidden md:table-cell">Expiry Date</th>
                 <th className="text-left p-3 text-xs font-medium text-dark-muted uppercase tracking-wider hidden lg:table-cell">Registrar</th>
                 <th className="text-left p-3 text-xs font-medium text-dark-muted uppercase tracking-wider hidden lg:table-cell">SEO Score</th>
@@ -177,14 +181,14 @@ export default function DomainsPage() {
               {loading ? (
                 [...Array(10)].map((_, i) => (
                   <tr key={i} className="border-b border-dark-border/50">
-                    <td colSpan={10} className="p-3">
+                    <td colSpan={11} className="p-3">
                       <div className="h-6 bg-dark-bg rounded animate-pulse" />
                     </td>
                   </tr>
                 ))
               ) : data.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="p-8 text-center text-dark-muted">
+                  <td colSpan={11} className="p-8 text-center text-dark-muted">
                     No domains found matching your filters.
                   </td>
                 </tr>
@@ -196,6 +200,26 @@ export default function DomainsPage() {
                     </td>
                     <td className="p-3 font-mono text-dark-muted text-xs hidden sm:table-cell">{d.tld}</td>
                     <td className="p-3"><StatusBadge status={d.status} /></td>
+                    <td className="p-3 hidden sm:table-cell">
+                      {d.is_online == null ? (
+                        <span className="text-dark-muted text-xs">-</span>
+                      ) : d.is_online ? (
+                        <span className="inline-flex items-center gap-1 text-xs text-green-400">
+                          <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+                          Live{d.http_status ? ` (${d.http_status})` : ''}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-xs text-red-400">
+                          <span className="w-2 h-2 rounded-full bg-red-500 inline-block" />
+                          Offline
+                        </span>
+                      )}
+                      {d.redirect_url && (
+                        <div className="text-[10px] text-dark-muted truncate max-w-[120px]" title={d.redirect_url}>
+                          {d.redirect_url}
+                        </div>
+                      )}
+                    </td>
                     <td className="p-3 font-mono text-xs hidden md:table-cell">
                       {d.expiry_date ? (
                         <span className={

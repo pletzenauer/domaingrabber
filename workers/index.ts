@@ -2,7 +2,7 @@ import { Worker, Job } from 'bullmq';
 import IORedis from 'ioredis';
 import { query } from '../lib/db';
 import { generateDomains, generateSlug, isCompanyName } from '../lib/domainGen';
-import { checkDomain } from '../lib/whois';
+import { checkDomain, checkDomainOnline } from '../lib/whois';
 import { sendBatchAlert } from '../lib/telegram';
 import { sendNtfyBatchAlert } from '../lib/ntfy';
 import { EdiktsdateiScraper } from '../scrapers/ediktsdatei';
@@ -251,10 +251,24 @@ const whoisWorker = new Worker(
 
     for (const row of result.rows) {
       try {
-        // 2. Check domain
+        // 2. Check WHOIS/RDAP registration status
         const check = await checkDomain(row.domain);
 
-        // 3. Update domains table
+        // 3. Check if domain has a live website
+        let isOnline: boolean | null = null;
+        let httpStatus: number | null = null;
+        let redirectUrl: string | null = null;
+
+        if (check.status === 'registered' || check.status === 'expiring') {
+          const httpCheck = await checkDomainOnline(row.domain);
+          isOnline = httpCheck.is_online;
+          httpStatus = httpCheck.http_status;
+          redirectUrl = httpCheck.redirect_url;
+        } else {
+          isOnline = false;
+        }
+
+        // 4. Update domains table
         await query(
           `UPDATE domains
            SET status = $1,
@@ -262,14 +276,20 @@ const whoisWorker = new Worker(
                registrar = $3,
                whois_raw = $4,
                rdap_raw = $5,
+               is_online = $6,
+               http_status = $7,
+               redirect_url = $8,
                last_checked = NOW()
-           WHERE id = $6`,
+           WHERE id = $9`,
           [
             check.status,
             check.expiry_date ?? null,
             check.registrar ?? null,
             check.whois_raw ?? null,
             check.rdap_raw ? JSON.stringify(check.rdap_raw) : null,
+            isOnline,
+            httpStatus,
+            redirectUrl,
             row.id,
           ]
         );

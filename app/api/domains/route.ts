@@ -47,6 +47,7 @@ export async function GET(request: NextRequest) {
     const dataResult = await query(
       `SELECT d.id, d.dissolution_id, d.domain, d.tld, d.status, d.expiry_date,
               d.registrar, d.last_checked, d.alert_sent, d.created_at,
+              d.is_online, d.http_status, d.redirect_url,
               d.backlink_count, d.referring_domains, d.domain_authority,
               d.page_rank, d.seo_score, d.scored_at,
               dis.company_name
