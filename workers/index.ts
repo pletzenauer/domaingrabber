@@ -184,19 +184,21 @@ const enrichWorker = new Worker(
 
     const companyName = result.rows[0].company_name;
 
-    // 1. Try WKO directory
-    const enrichment = await enrichCompany(companyName);
+    // 1. Primary: DuckDuckGo web search (most reliable)
+    let domain = await searchCompanyDomain(companyName);
+    let website: string | null = null;
 
-    // 2. If WKO didn't find a domain, try web search
-    let domain = enrichment.domain;
+    // 2. Fallback: WKO directory (if DDG found nothing)
     if (!domain) {
-      domain = await searchCompanyDomain(companyName);
+      const enrichment = await enrichCompany(companyName);
+      domain = enrichment.domain;
+      website = enrichment.existing_website;
     }
 
     // 3. Update dissolutions with website
     await query(
       `UPDATE dissolutions SET existing_website = $1, enriched_at = NOW() WHERE id = $2`,
-      [enrichment.existing_website, dissolution_id]
+      [website, dissolution_id]
     );
 
     // 4. If we found an actual domain, add it to the domains table

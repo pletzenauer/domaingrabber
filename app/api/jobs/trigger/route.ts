@@ -5,7 +5,10 @@ import {
   checkWhoisQueue,
   sendAlertsQueue,
   scoreDomainQueue,
+  enrichWKOQueue,
 } from '@/lib/queue';
+import { query } from '@/lib/db';
+import { isCompanyName } from '@/lib/domainGen';
 
 const QUEUE_MAP: Record<string, typeof scrapeEdiktsdateiQueue> = {
   scrapeEdiktsdatei: scrapeEdiktsdateiQueue,
@@ -15,7 +18,7 @@ const QUEUE_MAP: Record<string, typeof scrapeEdiktsdateiQueue> = {
   scoreDomain: scoreDomainQueue,
 };
 
-const VALID_JOBS = Object.keys(QUEUE_MAP);
+const VALID_JOBS = [...Object.keys(QUEUE_MAP), 'reEnrich'];
 
 export async function POST(request: NextRequest) {
   try {
@@ -29,6 +32,28 @@ export async function POST(request: NextRequest) {
         },
         { status: 400 }
       );
+    }
+
+    // Special: reEnrich queues enrichment for all un-enriched companies
+    if (jobName === 'reEnrich') {
+      const result = await query(
+        `SELECT id, company_name FROM dissolutions WHERE enriched_at IS NULL ORDER BY id`
+      );
+
+      let queued = 0;
+      for (const row of result.rows) {
+        // Only enrich companies, not natural persons
+        if (!isCompanyName(row.company_name)) continue;
+        await enrichWKOQueue.add('enrich', { dissolution_id: row.id });
+        queued++;
+      }
+
+      return NextResponse.json({
+        success: true,
+        job: 'reEnrich',
+        queued,
+        total: result.rowCount,
+      });
     }
 
     const queue = QUEUE_MAP[jobName];
