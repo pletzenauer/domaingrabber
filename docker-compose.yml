@@ -28,6 +28,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY}
       - JUSTIZ_API_ENABLED=false
 
   postgres:

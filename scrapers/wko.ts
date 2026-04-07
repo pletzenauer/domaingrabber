@@ -22,22 +22,6 @@ function extractDomain(url: string): string | null {
 }
 
 /**
- * Extract actual URL from DuckDuckGo redirect link.
- * DDG links look like: //duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com&rut=...
- */
-function extractDDGUrl(href: string): string | null {
-  try {
-    // Normalize protocol-relative URLs
-    const fullUrl = href.startsWith('//') ? `https:${href}` : href;
-    const parsed = new URL(fullUrl);
-    const uddg = parsed.searchParams.get('uddg');
-    return uddg || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Check if a domain is a generic/platform domain (not a company domain).
  */
 function isGenericDomain(domain: string): boolean {
@@ -55,18 +39,19 @@ function isGenericDomain(domain: string): boolean {
     'yelp.com', 'tripadvisor.com', 'tripadvisor.at',
     'booking.com', 'falstaff.at',
     // Search engines & general
-    'google.com', 'google.at', 'duckduckgo.com',
-    'wikipedia.org', 'reddit.com',
+    'google.com', 'google.at', 'duckduckgo.com', 'bing.com',
+    'wikipedia.org', 'reddit.com', 'amazon.com', 'amazon.de',
     // Austrian government / legal
     'justiz.gv.at', 'ris.bka.gv.at', 'usp.gv.at', 'wienerborse.at',
-    'ediktsdatei.justiz.gv.at',
+    'ediktsdatei.justiz.gv.at', 'data.gv.at',
+    // News / media
+    'derstandard.at', 'diepresse.com', 'orf.at', 'krone.at',
   ];
   return generic.some((g) => domain === g || domain.endsWith('.' + g));
 }
 
 /**
- * Strip the brand/company name to a cleaner search query.
- * Removes legal suffixes for better search results.
+ * Strip legal suffixes and noise from company name for better search results.
  */
 function cleanCompanyNameForSearch(name: string): string {
   let cleaned = name.trim();
@@ -80,68 +65,59 @@ function cleanCompanyNameForSearch(name: string): string {
 }
 
 /**
- * Primary: Find company domain via DuckDuckGo HTML search.
- * Parses DDG redirect URLs to extract actual target domains.
+ * Primary: Find company domain via Brave Search API.
+ * Free tier: 2,000 queries/month. Reliable, no CAPTCHA.
  */
 export async function searchCompanyDomain(companyName: string): Promise<string | null> {
+  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
+  if (!apiKey) {
+    console.warn('[Search] BRAVE_SEARCH_API_KEY not set, skipping web search');
+    return null;
+  }
+
   try {
     const cleanName = cleanCompanyNameForSearch(companyName);
     if (!cleanName || cleanName.length < 2) return null;
 
     const searchQuery = `${cleanName} Austria`;
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchQuery)}`;
 
-    const { data: html } = await axios.get<string>(url, {
-      timeout: 10_000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'de-AT,de;q=0.9,en;q=0.5',
+    const { data } = await axios.get('https://api.search.brave.com/res/v1/web/search', {
+      params: {
+        q: searchQuery,
+        count: 5,
+        country: 'AT',
       },
+      headers: {
+        'Accept': 'application/json',
+        'Accept-Encoding': 'gzip',
+        'X-Subscription-Token': apiKey,
+      },
+      timeout: 10_000,
     });
 
-    const $ = cheerio.load(html);
+    const results = data?.web?.results;
+    if (!results || !Array.isArray(results)) return null;
 
-    const results: string[] = [];
+    for (const result of results) {
+      const url = result.url;
+      if (!url) continue;
 
-    // DDG uses redirect links: //duckduckgo.com/l/?uddg=<encoded-url>&rut=...
-    $('a.result__a').each((_i, el) => {
-      if (results.length >= 5) return; // only check first 5
-      const href = $(el).attr('href') || '';
-      const actualUrl = extractDDGUrl(href);
-      if (!actualUrl) return;
-
-      const domain = extractDomain(actualUrl);
-      if (domain && !isGenericDomain(domain) && !results.includes(domain)) {
-        results.push(domain);
+      const domain = extractDomain(url);
+      if (domain && !isGenericDomain(domain)) {
+        return domain;
       }
-    });
-
-    // Also try result__url links as backup
-    if (results.length === 0) {
-      $('a.result__url').each((_i, el) => {
-        if (results.length >= 5) return;
-        const href = $(el).attr('href') || '';
-        const actualUrl = extractDDGUrl(href);
-        if (!actualUrl) return;
-
-        const domain = extractDomain(actualUrl);
-        if (domain && !isGenericDomain(domain) && !results.includes(domain)) {
-          results.push(domain);
-        }
-      });
     }
 
-    return results[0] || null;
+    return null;
   } catch (err) {
-    console.warn(`[DDG] Search failed for "${companyName}":`, err instanceof Error ? err.message : err);
+    console.warn(`[Search] Brave search failed for "${companyName}":`, err instanceof Error ? err.message : err);
     return null;
   }
 }
 
 /**
- * Secondary/fallback: Search WKO Firmen A-Z directory.
- * Less reliable than DDG but can provide the official registered website.
+ * Fallback: Search WKO Firmen A-Z directory.
+ * Less reliable but can provide the official registered website.
  */
 export async function enrichCompany(
   companyName: string
