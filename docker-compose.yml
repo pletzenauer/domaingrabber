@@ -1,0 +1,52 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on: [postgres, redis]
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - JUSTIZ_API_ENABLED=false
+    ports:
+      - "3000:3000"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.domainwatch.rule=Host(`${APP_DOMAIN}`)
+      - traefik.http.routers.domainwatch.tls=true
+      - traefik.http.routers.domainwatch.tls.certresolver=letsencrypt
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    depends_on: [postgres, redis]
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - JUSTIZ_API_ENABLED=false
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: domainwatch
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+
+volumes:
+  pgdata:
+  redisdata:

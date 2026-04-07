@@ -1,0 +1,11 @@
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS backlink_count INTEGER DEFAULT 0;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS referring_domains INTEGER DEFAULT 0;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS domain_authority REAL DEFAULT 0;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS organic_keywords INTEGER DEFAULT 0;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS page_rank REAL DEFAULT 0;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS seo_score INTEGER DEFAULT 0;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS score_raw JSONB;
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS scored_at TIMESTAMPTZ;
+
+CREATE INDEX idx_domains_seo_score ON domains(seo_score DESC);
+CREATE INDEX idx_domains_domain_authority ON domains(domain_authority DESC);
