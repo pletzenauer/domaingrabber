@@ -73,52 +73,76 @@ async function downloadCsv(): Promise<string> {
 }
 
 /**
- * Simple ZIP extraction — finds the first file entry and decompresses it.
- * Handles the common case of a single CSV inside a ZIP.
+ * Extract the first CSV file from a ZIP buffer.
+ * Reads the central directory (at end of ZIP) to get accurate file sizes,
+ * since local file headers may have zero-length sizes (data descriptor format).
  */
 function extractFirstFileFromZip(zipBuffer: Buffer): string {
-  // Find local file headers (PK\x03\x04)
-  let offset = 0;
-
-  while (offset < zipBuffer.length - 4) {
-    // Check for local file header signature
+  // Find End of Central Directory record (EOCD) — scan backwards from end
+  let eocdOffset = -1;
+  for (let i = zipBuffer.length - 22; i >= 0; i--) {
     if (
-      zipBuffer[offset] === 0x50 &&
-      zipBuffer[offset + 1] === 0x4b &&
-      zipBuffer[offset + 2] === 0x03 &&
-      zipBuffer[offset + 3] === 0x04
+      zipBuffer[i] === 0x50 &&
+      zipBuffer[i + 1] === 0x4b &&
+      zipBuffer[i + 2] === 0x05 &&
+      zipBuffer[i + 3] === 0x06
     ) {
-      // Parse local file header
-      const compressionMethod = zipBuffer.readUInt16LE(offset + 8);
-      const compressedSize = zipBuffer.readUInt32LE(offset + 18);
-      const uncompressedSize = zipBuffer.readUInt32LE(offset + 22);
-      const fileNameLength = zipBuffer.readUInt16LE(offset + 26);
-      const extraFieldLength = zipBuffer.readUInt16LE(offset + 28);
-      const fileName = zipBuffer.toString('utf-8', offset + 30, offset + 30 + fileNameLength);
-
-      console.log(`[GISA] ZIP entry: "${fileName}" (${compressionMethod === 0 ? 'stored' : 'deflated'}, ${(compressedSize / 1024 / 1024).toFixed(1)} MB compressed, ${(uncompressedSize / 1024 / 1024).toFixed(1)} MB uncompressed)`);
-
-      const dataStart = offset + 30 + fileNameLength + extraFieldLength;
-
-      if (fileName.toLowerCase().endsWith('.csv')) {
-        if (compressionMethod === 0) {
-          // Stored (no compression)
-          return zipBuffer.toString('utf-8', dataStart, dataStart + compressedSize);
-        } else if (compressionMethod === 8) {
-          // Deflated — use zlib inflateRawSync
-          const { inflateRawSync } = require('zlib');
-          const compressed = zipBuffer.subarray(dataStart, dataStart + compressedSize);
-          const decompressed = inflateRawSync(compressed);
-          console.log(`[GISA] Decompressed ${(decompressed.length / 1024 / 1024).toFixed(1)} MB`);
-          return decompressed.toString('utf-8');
-        }
-      }
-
-      // Skip to next entry
-      offset = dataStart + compressedSize;
-      continue;
+      eocdOffset = i;
+      break;
     }
-    offset++;
+  }
+
+  if (eocdOffset === -1) {
+    throw new Error('Invalid ZIP: End of Central Directory not found');
+  }
+
+  const centralDirOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
+  const centralDirEntries = zipBuffer.readUInt16LE(eocdOffset + 10);
+
+  console.log(`[GISA] ZIP central directory: ${centralDirEntries} entries at offset ${centralDirOffset}`);
+
+  // Parse central directory entries (PK\x01\x02)
+  let cdOffset = centralDirOffset;
+  for (let i = 0; i < centralDirEntries; i++) {
+    if (
+      zipBuffer[cdOffset] !== 0x50 ||
+      zipBuffer[cdOffset + 1] !== 0x4b ||
+      zipBuffer[cdOffset + 2] !== 0x01 ||
+      zipBuffer[cdOffset + 3] !== 0x02
+    ) {
+      break;
+    }
+
+    const compressionMethod = zipBuffer.readUInt16LE(cdOffset + 10);
+    const compressedSize = zipBuffer.readUInt32LE(cdOffset + 20);
+    const uncompressedSize = zipBuffer.readUInt32LE(cdOffset + 24);
+    const fileNameLength = zipBuffer.readUInt16LE(cdOffset + 28);
+    const extraFieldLength = zipBuffer.readUInt16LE(cdOffset + 30);
+    const commentLength = zipBuffer.readUInt16LE(cdOffset + 32);
+    const localHeaderOffset = zipBuffer.readUInt32LE(cdOffset + 42);
+    const fileName = zipBuffer.toString('utf-8', cdOffset + 46, cdOffset + 46 + fileNameLength);
+
+    console.log(`[GISA] ZIP entry: "${fileName}" (${compressionMethod === 0 ? 'stored' : 'deflated'}, ${(compressedSize / 1024 / 1024).toFixed(1)} MB compressed, ${(uncompressedSize / 1024 / 1024).toFixed(1)} MB uncompressed)`);
+
+    if (fileName.toLowerCase().endsWith('.csv')) {
+      // Read local file header to find data start
+      const localFileNameLength = zipBuffer.readUInt16LE(localHeaderOffset + 26);
+      const localExtraFieldLength = zipBuffer.readUInt16LE(localHeaderOffset + 28);
+      const dataStart = localHeaderOffset + 30 + localFileNameLength + localExtraFieldLength;
+
+      if (compressionMethod === 0) {
+        return zipBuffer.toString('utf-8', dataStart, dataStart + compressedSize);
+      } else if (compressionMethod === 8) {
+        const { inflateRawSync } = require('zlib');
+        const compressed = zipBuffer.subarray(dataStart, dataStart + compressedSize);
+        const decompressed = inflateRawSync(compressed);
+        console.log(`[GISA] Decompressed ${(decompressed.length / 1024 / 1024).toFixed(1)} MB`);
+        return decompressed.toString('utf-8');
+      }
+    }
+
+    // Move to next central directory entry
+    cdOffset += 46 + fileNameLength + extraFieldLength + commentLength;
   }
 
   throw new Error('No CSV file found in ZIP archive');
