@@ -2,71 +2,40 @@ import axios from 'axios';
 import { parse } from 'csv-parse/sync';
 import type { ScraperAdapter, ScraperResult } from './index';
 
-const CATALOG_API_URL =
-  'https://data.gv.at/katalog/api/3/action/package_show?id=gisa';
-
-interface CatalogResource {
-  url: string;
-  format: string;
-  name: string;
-  description?: string;
-}
-
-interface CatalogResponse {
-  success: boolean;
-  result: {
-    resources: CatalogResource[];
-  };
-}
-
 /**
- * Map GISA status to our proceeding type.
- * Returns null if the status is not relevant (i.e., the business is still active).
+ * GISA (Gewerbeinformationssystem Austria) Scraper
+ *
+ * Data source: data.gv.at open data CSV (updated monthly)
+ * Direct URL: ZIP file containing GISA-OpenData.csv
+ *
+ * IMPORTANT: The GISA open data CSV is partially anonymized — it contains
+ * trade types, locations, and status but NOT company names for natural persons.
+ * Only entries with INHABER_PERS_ART = 'J' (juristische Person / legal entity)
+ * may have identifiable business info via the GEWERBEWORTLAUT field.
+ *
+ * The old CKAN API (data.gv.at/katalog/api/3/action/package_show) has been
+ * replaced by a Vue.js SPA and no longer returns JSON.
  */
-function mapStatus(status: string): string | null {
-  const lower = status.toLowerCase().trim();
-  if (lower === 'erloschen' || lower === 'gewerbe erloschen') return 'gewerbe_erloschen';
-  if (lower === 'ruhend' || lower === 'gewerbe ruhend') return 'gewerbe_ruhend';
-  if (lower === 'gelöscht' || lower === 'geloescht') return 'gewerbe_erloschen';
-  if (lower === 'zurückgelegt' || lower === 'zurueckgelegt') return 'gewerbe_erloschen';
-  if (lower === 'entzogen') return 'gewerbe_erloschen';
-  return null;
-}
+
+const DIRECT_CSV_URL =
+  'https://www.data.gv.at/katalog/dataset/e49a1510-9d93-4277-8467-48a1efc9f046/resource/5739b17a-8e92-466f-8a42-84d4eb3e0f18/download/gewerbe_in_oesterreich.csv';
 
 /**
- * Parse date strings in various Austrian/European formats to ISO YYYY-MM-DD.
+ * Parse date strings in Austrian/European formats to ISO YYYY-MM-DD.
  */
 function parseDate(dateStr: string | undefined): string {
   if (!dateStr) return new Date().toISOString().slice(0, 10);
-
   const trimmed = dateStr.trim();
 
-  // DD.MM.YYYY
   const dotMatch = trimmed.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
   if (dotMatch) {
     const [, day, month, year] = dotMatch;
     return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
   }
 
-  // YYYY-MM-DD (ISO)
   const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (isoMatch) return isoMatch[0];
 
-  // DD/MM/YYYY
-  const slashMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (slashMatch) {
-    const [, day, month, year] = slashMatch;
-    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-  }
-
-  // DD-MM-YYYY
-  const dashMatch = trimmed.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
-  if (dashMatch) {
-    const [, day, month, year] = dashMatch;
-    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-  }
-
-  // Generic Date parse fallback
   const d = new Date(trimmed);
   if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
 
@@ -74,92 +43,85 @@ function parseDate(dateStr: string | undefined): string {
 }
 
 /**
- * Find the CSV download URL from the GISA catalog API.
+ * Download and extract the GISA CSV from the ZIP file.
+ * The data.gv.at download URL returns a ZIP despite having a .csv extension.
  */
-async function findCsvUrl(): Promise<string> {
-  console.log(`[GISA] Fetching catalog metadata from ${CATALOG_API_URL}...`);
+async function downloadCsv(): Promise<string> {
+  console.log(`[GISA] Downloading from ${DIRECT_CSV_URL}...`);
 
-  const { data } = await axios.get<CatalogResponse>(CATALOG_API_URL, {
-    timeout: 15_000,
+  const response = await axios.get(DIRECT_CSV_URL, {
+    timeout: 120_000,
+    responseType: 'arraybuffer',
     headers: { 'User-Agent': 'AustrianDomainWatch/1.0' },
+    maxContentLength: 500 * 1024 * 1024,
   });
 
-  if (!data.success || !data.result?.resources?.length) {
-    throw new Error('GISA catalog API returned no resources');
+  const buffer = Buffer.from(response.data);
+  const sizeMb = (buffer.length / 1024 / 1024).toFixed(1);
+  console.log(`[GISA] Downloaded ${sizeMb} MB`);
+
+  // Check if the response is a ZIP file (magic bytes PK\x03\x04)
+  if (buffer[0] === 0x50 && buffer[1] === 0x4b) {
+    console.log(`[GISA] Detected ZIP archive, extracting...`);
+    // Use built-in Node.js zlib for simple ZIP extraction
+    // ZIP files have a local file header starting with PK\x03\x04
+    return extractFirstFileFromZip(buffer);
   }
 
-  console.log(`[GISA] Found ${data.result.resources.length} resources in catalog:`);
-  for (const r of data.result.resources) {
-    console.log(`  - ${r.name} (${r.format}): ${r.url}`);
-  }
-
-  // Prefer CSV format (case-insensitive)
-  const csvResource = data.result.resources.find(
-    (r) => r.format.toUpperCase() === 'CSV'
-  );
-  if (csvResource) return csvResource.url;
-
-  // Fallback: any resource with .csv in the URL
-  const csvByUrl = data.result.resources.find((r) =>
-    r.url.toLowerCase().includes('.csv')
-  );
-  if (csvByUrl) return csvByUrl.url;
-
-  // Fallback: try the first resource regardless of format
-  const firstResource = data.result.resources[0];
-  console.warn(`[GISA] No CSV resource found. Trying first resource: ${firstResource.format} - ${firstResource.url}`);
-  return firstResource.url;
+  // Not a ZIP, treat as raw CSV
+  return buffer.toString('utf-8');
 }
 
 /**
- * Detect the CSV delimiter by examining the first few lines.
+ * Simple ZIP extraction — finds the first file entry and decompresses it.
+ * Handles the common case of a single CSV inside a ZIP.
  */
-function detectDelimiter(csvText: string): string {
-  const firstLines = csvText.split('\n').slice(0, 5).join('\n');
+function extractFirstFileFromZip(zipBuffer: Buffer): string {
+  // Find local file headers (PK\x03\x04)
+  let offset = 0;
 
-  // Count potential delimiters in the header line
-  const headerLine = csvText.split('\n')[0] || '';
-  const semicolonCount = (headerLine.match(/;/g) || []).length;
-  const commaCount = (headerLine.match(/,/g) || []).length;
-  const tabCount = (headerLine.match(/\t/g) || []).length;
-  const pipeCount = (headerLine.match(/\|/g) || []).length;
+  while (offset < zipBuffer.length - 4) {
+    // Check for local file header signature
+    if (
+      zipBuffer[offset] === 0x50 &&
+      zipBuffer[offset + 1] === 0x4b &&
+      zipBuffer[offset + 2] === 0x03 &&
+      zipBuffer[offset + 3] === 0x04
+    ) {
+      // Parse local file header
+      const compressionMethod = zipBuffer.readUInt16LE(offset + 8);
+      const compressedSize = zipBuffer.readUInt32LE(offset + 18);
+      const uncompressedSize = zipBuffer.readUInt32LE(offset + 22);
+      const fileNameLength = zipBuffer.readUInt16LE(offset + 26);
+      const extraFieldLength = zipBuffer.readUInt16LE(offset + 28);
+      const fileName = zipBuffer.toString('utf-8', offset + 30, offset + 30 + fileNameLength);
 
-  console.log(`[GISA] Delimiter detection - semicolons: ${semicolonCount}, commas: ${commaCount}, tabs: ${tabCount}, pipes: ${pipeCount}`);
+      console.log(`[GISA] ZIP entry: "${fileName}" (${compressionMethod === 0 ? 'stored' : 'deflated'}, ${(compressedSize / 1024 / 1024).toFixed(1)} MB compressed, ${(uncompressedSize / 1024 / 1024).toFixed(1)} MB uncompressed)`);
 
-  // Austrian government CSVs most commonly use semicolons
-  if (semicolonCount >= commaCount && semicolonCount >= tabCount && semicolonCount > 0) return ';';
-  if (tabCount >= commaCount && tabCount >= semicolonCount && tabCount > 0) return '\t';
-  if (pipeCount >= commaCount && pipeCount > 0) return '|';
-  if (commaCount > 0) return ',';
+      const dataStart = offset + 30 + fileNameLength + extraFieldLength;
 
-  // Default to semicolon for Austrian data
-  return ';';
-}
+      if (fileName.toLowerCase().endsWith('.csv')) {
+        if (compressionMethod === 0) {
+          // Stored (no compression)
+          return zipBuffer.toString('utf-8', dataStart, dataStart + compressedSize);
+        } else if (compressionMethod === 8) {
+          // Deflated — use zlib inflateRawSync
+          const { inflateRawSync } = require('zlib');
+          const compressed = zipBuffer.subarray(dataStart, dataStart + compressedSize);
+          const decompressed = inflateRawSync(compressed);
+          console.log(`[GISA] Decompressed ${(decompressed.length / 1024 / 1024).toFixed(1)} MB`);
+          return decompressed.toString('utf-8');
+        }
+      }
 
-/**
- * Find a column value by trying multiple possible names (case-insensitive).
- * Austrian government CSVs may use different column name conventions.
- */
-function findColumn(row: Record<string, string | undefined>, ...candidates: string[]): string {
-  for (const candidate of candidates) {
-    // Try exact match first
-    if (row[candidate] !== undefined) return row[candidate] || '';
-    // Try case-insensitive
-    const key = Object.keys(row).find(k => k.toLowerCase() === candidate.toLowerCase());
-    if (key && row[key] !== undefined) return row[key] || '';
+      // Skip to next entry
+      offset = dataStart + compressedSize;
+      continue;
+    }
+    offset++;
   }
-  return '';
-}
 
-/**
- * Find a column value using partial match (contains).
- */
-function findColumnPartial(row: Record<string, string | undefined>, ...partials: string[]): string {
-  for (const partial of partials) {
-    const key = Object.keys(row).find(k => k.toLowerCase().includes(partial.toLowerCase()));
-    if (key && row[key] !== undefined) return row[key] || '';
-  }
-  return '';
+  throw new Error('No CSV file found in ZIP archive');
 }
 
 export class GisaScraper implements ScraperAdapter {
@@ -169,30 +131,24 @@ export class GisaScraper implements ScraperAdapter {
   async run(): Promise<ScraperResult[]> {
     console.log(`[${this.name}] Starting scrape...`);
 
-    // Step 1: Find CSV resource URL from catalog
-    const csvUrl = await findCsvUrl();
-    console.log(`[${this.name}] CSV URL: ${csvUrl}`);
+    let csvData: string;
+    try {
+      csvData = await downloadCsv();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[${this.name}] Failed to download GISA data: ${msg}`);
+      console.log(`[${this.name}] The GISA open data source may be temporarily unavailable.`);
+      return [];
+    }
 
-    // Step 2: Download CSV with streaming support for large files
-    console.log(`[${this.name}] Downloading CSV (this may take a while for large files)...`);
-    const { data: csvData, headers } = await axios.get<string>(csvUrl, {
-      timeout: 300_000, // 5 minutes for large files
-      responseType: 'text',
-      headers: { 'User-Agent': 'AustrianDomainWatch/1.0' },
-      maxContentLength: 500 * 1024 * 1024, // 500 MB limit
-    });
+    // Parse CSV (semicolon-delimited, Austrian government standard)
+    const headerLine = csvData.split('\n')[0]?.trim() || '';
+    console.log(`[${this.name}] CSV header: ${headerLine.slice(0, 300)}`);
 
-    const contentType = headers['content-type'] || '';
-    const sizeInMb = (csvData.length / 1024 / 1024).toFixed(1);
-    console.log(`[${this.name}] Downloaded: ${sizeInMb} MB (Content-Type: ${contentType})`);
-
-    // Step 3: Detect delimiter and parse
-    const delimiter = detectDelimiter(csvData);
-    console.log(`[${this.name}] Detected delimiter: ${JSON.stringify(delimiter)}`);
-
-    // Log the first line (header) for debugging
-    const firstLine = csvData.split('\n')[0]?.trim();
-    console.log(`[${this.name}] CSV header: ${firstLine?.slice(0, 300)}`);
+    // Detect delimiter
+    const semicolons = (headerLine.match(/;/g) || []).length;
+    const commas = (headerLine.match(/,/g) || []).length;
+    const delimiter = semicolons >= commas ? ';' : ',';
 
     let rows: Record<string, string | undefined>[];
     try {
@@ -203,157 +159,81 @@ export class GisaScraper implements ScraperAdapter {
         trim: true,
         relax_column_count: true,
         bom: true,
-        // Handle quoted fields
         quote: '"',
         escape: '"',
-        // Skip comment lines
-        comment: '#',
       });
     } catch (parseErr) {
-      console.error(`[${this.name}] CSV parse failed with delimiter ${JSON.stringify(delimiter)}:`,
-        parseErr instanceof Error ? parseErr.message : parseErr);
-
-      // Retry with alternative delimiters
-      const altDelimiters = [';', ',', '\t', '|'].filter(d => d !== delimiter);
-      let parsed = false;
-      for (const altDelim of altDelimiters) {
-        try {
-          console.log(`[${this.name}] Retrying with delimiter ${JSON.stringify(altDelim)}...`);
-          rows = parse(csvData, {
-            delimiter: altDelim,
-            columns: true,
-            skip_empty_lines: true,
-            trim: true,
-            relax_column_count: true,
-            bom: true,
-            quote: '"',
-            escape: '"',
-          });
-          console.log(`[${this.name}] Successfully parsed with delimiter ${JSON.stringify(altDelim)}`);
-          parsed = true;
-          break;
-        } catch {
-          continue;
-        }
-      }
-      if (!parsed) {
-        throw new Error(`Failed to parse CSV with any delimiter. First line: ${firstLine?.slice(0, 200)}`);
-      }
+      console.error(`[${this.name}] CSV parse failed:`, parseErr instanceof Error ? parseErr.message : parseErr);
+      return [];
     }
 
-    console.log(`[${this.name}] Parsed ${rows!.length} total rows`);
+    console.log(`[${this.name}] Parsed ${rows.length} total rows`);
 
-    // Log available columns for debugging
-    if (rows!.length > 0) {
-      const columns = Object.keys(rows![0]!);
-      console.log(`[${this.name}] CSV columns: ${columns.join(', ')}`);
+    if (rows.length > 0) {
+      const columns = Object.keys(rows[0]!);
+      console.log(`[${this.name}] Columns: ${columns.join(', ')}`);
     }
 
-    // Step 4: Filter for dissolved/dormant businesses
+    // Known columns from data.gv.at GISA dataset:
+    // NUTS1, NUTS2, NUTS3, LAU1, LAU2, ADRESS_ART, GEWERBESCHLUESSEL,
+    // GEWERBEWORTLAUT, GEWERBEART, POSTLEITZAHL, ORTSCHAFT,
+    // RECHTSWIRKSAM, RUHEND_VON, INHABER_PERS_ART
+
+    // Filter for dormant (ruhend) businesses — these have RUHEND_VON set
     const results: ScraperResult[] = [];
-    let statusFieldUsed = '';
-    let companyFieldUsed = '';
+    let dormantCount = 0;
+    let legalEntityDormant = 0;
 
-    for (const row of rows!) {
-      // Find status field (try many variations)
-      const status = findColumn(row,
-        'STATUS', 'status', 'Status',
-        'GEWERBESTATUS', 'Gewerbestatus', 'gewerbestatus',
-        'GEWERBEZUSTAND', 'Gewerbezustand',
-        'ZUSTAND', 'Zustand', 'zustand'
-      ) || findColumnPartial(row, 'status', 'zustand', 'state');
+    for (const row of rows) {
+      const ruhendVon = (row['RUHEND_VON'] || row['ruhend_von'] || '').trim();
+      if (!ruhendVon) continue;
 
-      if (!statusFieldUsed && status) {
-        // Log which field we found the status in (once)
-        const statusKey = Object.keys(row).find(k =>
-          k.toLowerCase().includes('status') || k.toLowerCase().includes('zustand')
-        );
-        statusFieldUsed = statusKey || 'unknown';
-        console.log(`[${this.name}] Using status field: "${statusFieldUsed}" (sample value: "${status}")`);
-      }
+      dormantCount++;
 
-      const proceedingType = mapStatus(status);
-      if (!proceedingType) continue;
+      // Only process legal entities (juristische Personen) as they have
+      // identifiable business names more likely to have domain names
+      const persArt = (row['INHABER_PERS_ART'] || row['inhaber_pers_art'] || '').trim();
+      if (persArt !== 'J') continue;
 
-      // Find company name field
-      const companyName = findColumn(row,
-        'FIRMA', 'firma', 'Firma',
-        'FIRMENNAME', 'Firmenname', 'firmenname',
-        'NAME', 'name', 'Name',
-        'BEZEICHNUNG', 'Bezeichnung', 'bezeichnung',
-        'UNTERNEHMEN', 'Unternehmen',
-        'BETRIEBSNAME', 'Betriebsname'
-      ) || findColumnPartial(row, 'firma', 'name', 'bezeichn', 'unternehm', 'betrieb');
+      legalEntityDormant++;
 
-      if (!companyName) continue;
+      // Use GEWERBEWORTLAUT as the company/trade description
+      // This isn't a company name per se, but for legal entities it often
+      // contains identifiable business information
+      const gewerbeWortlaut = (row['GEWERBEWORTLAUT'] || row['gewerbewortlaut'] || '').trim();
+      const gewerbeArt = (row['GEWERBEART'] || row['gewerbeart'] || '').trim();
+      const plz = (row['POSTLEITZAHL'] || row['postleitzahl'] || '').trim();
+      const ort = (row['ORTSCHAFT'] || row['ortschaft'] || '').trim();
+      const location = [plz, ort].filter(Boolean).join(' ');
 
-      if (!companyFieldUsed) {
-        const nameKey = Object.keys(row).find(k =>
-          k.toLowerCase().includes('firma') || k.toLowerCase().includes('name')
-        );
-        companyFieldUsed = nameKey || 'unknown';
-        console.log(`[${this.name}] Using company name field: "${companyFieldUsed}" (sample: "${companyName}")`);
-      }
-
-      // Find location fields
-      const plz = findColumn(row, 'PLZ', 'plz', 'Plz', 'POSTLEITZAHL', 'Postleitzahl')
-        || findColumnPartial(row, 'plz', 'postleitz');
-      const ort = findColumn(row, 'ORT', 'ort', 'Ort', 'GEMEINDE', 'Gemeinde', 'STADT', 'Stadt')
-        || findColumnPartial(row, 'ort', 'gemeinde', 'stadt', 'city');
-      const courtLocation = [plz, ort].filter(Boolean).join(' ').trim();
-
-      // Find date field
-      const dateStr = findColumn(row,
-        'DATUM', 'datum', 'Datum',
-        'ENDDATUM', 'Enddatum', 'enddatum',
-        'ENDEDATUM', 'Endedatum',
-        'AENDERUNGSDATUM', 'Aenderungsdatum',
-        'ERLOESCHDATUM', 'Erloeschdatum',
-        'LOESCHDATUM', 'Loeschdatum',
-        'STATUSDATUM', 'Statusdatum'
-      ) || findColumnPartial(row, 'datum', 'date', 'ende', 'erlosch', 'lösch');
-
-      // Find GISA reference number
-      const gisaZahl = findColumn(row,
-        'GISA_ZAHL', 'gisa_zahl', 'Gisa_Zahl',
-        'GISA-ZAHL', 'GISAZAHL', 'Gisazahl',
-        'GISA_NR', 'GISA_NUMMER',
-        'NR', 'NUMMER', 'nummer'
-      ) || findColumnPartial(row, 'gisa', 'zahl', 'nummer');
-
-      // Find trade/business type
-      const gewerbe = findColumn(row,
-        'GEWERBE', 'gewerbe', 'Gewerbe',
-        'GEWERBEART', 'Gewerbeart',
-        'TAETIGKEIT', 'Taetigkeit', 'Tätigkeit',
-        'BRANCHE', 'Branche'
-      ) || findColumnPartial(row, 'gewerbe', 'taetigk', 'tätigk', 'branche');
+      // Skip if no meaningful trade description
+      if (!gewerbeWortlaut || gewerbeWortlaut.length < 3) continue;
 
       results.push({
-        company_name: companyName,
-        court: courtLocation || undefined,
-        proceeding_type: proceedingType,
-        gazette_date: parseDate(dateStr || undefined),
-        source_ref: gisaZahl || undefined,
+        company_name: gewerbeWortlaut,
+        court: location || undefined,
+        proceeding_type: 'gewerbe_ruhend',
+        gazette_date: parseDate(ruhendVon),
         source_url: 'https://data.gv.at/katalog/dataset/gisa',
+        source_ref: row['GEWERBESCHLUESSEL'] || row['gewerbeschluessel'] || undefined,
         raw_data: {
-          gisa_zahl: gisaZahl || undefined,
-          gewerbe: gewerbe || undefined,
+          gewerbeart: gewerbeArt || undefined,
           plz: plz || undefined,
           ort: ort || undefined,
-          status,
+          inhaber_pers_art: persArt,
+          ruhend_von: ruhendVon,
         },
       });
     }
 
-    console.log(`[${this.name}] Filtered results: ${results.length} (erloschen/ruhend/geloescht)`);
+    console.log(`[${this.name}] Stats: ${rows.length} total, ${dormantCount} dormant, ${legalEntityDormant} legal entity dormant`);
+    console.log(`[${this.name}] Returning ${results.length} results (dormant legal entities with trade descriptions)`);
 
-    // Log some stats about status distribution
-    const statusCounts: Record<string, number> = {};
-    for (const r of results) {
-      statusCounts[r.proceeding_type] = (statusCounts[r.proceeding_type] || 0) + 1;
+    if (results.length === 0 && dormantCount > 0) {
+      console.log(`[${this.name}] Note: ${dormantCount} dormant entries found but none were legal entities with usable trade descriptions.`);
+      console.log(`[${this.name}] The GISA open data does not contain company names — only trade descriptions.`);
+      console.log(`[${this.name}] For company-level dissolution data, the Ediktsdatei scraper is the primary source.`);
     }
-    console.log(`[${this.name}] Status distribution:`, statusCounts);
 
     return results;
   }
