@@ -3,146 +3,109 @@ import IORedis from 'ioredis';
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
 
-const connection = new IORedis(REDIS_URL, {
-  maxRetriesPerRequest: null,
-  enableReadyCheck: false,
-});
+let _connection: IORedis | null = null;
 
-connection.on('error', (err) => {
-  console.error('Redis connection error:', err.message);
-});
+function getConnection(): IORedis {
+  if (!_connection) {
+    _connection = new IORedis(REDIS_URL, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: false,
+    });
+    _connection.on('error', (err) => {
+      console.error('Redis connection error:', err.message);
+    });
+  }
+  return _connection;
+}
 
-// --- Queue definitions ---
+function createQueue(name: string, opts: object = {}) {
+  return new Queue(name, {
+    connection: getConnection(),
+    defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: 'exponential' as const, delay: 5000 },
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 500 },
+      ...opts,
+    },
+  });
+}
 
-export const scrapeEdiktsdateiQueue = new Queue('scrapeEdiktsdatei', {
-  connection,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 500 },
-  },
-});
+// Lazy queue getters to avoid connecting during Next.js build
+let _scrapeEdiktsdateiQueue: Queue;
+let _scrapeGISAQueue: Queue;
+let _enrichWKOQueue: Queue;
+let _checkWhoisQueue: Queue;
+let _scoreDomainQueue: Queue;
+let _sendAlertsQueue: Queue;
 
-export const scrapeGISAQueue = new Queue('scrapeGISA', {
-  connection,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 10000 },
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 500 },
-  },
-});
+export function getScrapeEdiktsdateiQueue() {
+  if (!_scrapeEdiktsdateiQueue) _scrapeEdiktsdateiQueue = createQueue('scrapeEdiktsdatei');
+  return _scrapeEdiktsdateiQueue;
+}
+export function getScrapeGISAQueue() {
+  if (!_scrapeGISAQueue) _scrapeGISAQueue = createQueue('scrapeGISA', { backoff: { type: 'exponential', delay: 10000 } });
+  return _scrapeGISAQueue;
+}
+export function getEnrichWKOQueue() {
+  if (!_enrichWKOQueue) _enrichWKOQueue = createQueue('enrichWKO', { removeOnComplete: { count: 200 } });
+  return _enrichWKOQueue;
+}
+export function getCheckWhoisQueue() {
+  if (!_checkWhoisQueue) _checkWhoisQueue = createQueue('checkWhois', { attempts: 2, backoff: { type: 'fixed', delay: 15000 }, removeOnComplete: { count: 500 }, removeOnFail: { count: 1000 } });
+  return _checkWhoisQueue;
+}
+export function getScoreDomainQueue() {
+  if (!_scoreDomainQueue) _scoreDomainQueue = createQueue('scoreDomain', { attempts: 2, backoff: { type: 'fixed', delay: 10000 }, removeOnComplete: { count: 500 } });
+  return _scoreDomainQueue;
+}
+export function getSendAlertsQueue() {
+  if (!_sendAlertsQueue) _sendAlertsQueue = createQueue('sendAlerts', { removeOnFail: { count: 200 } });
+  return _sendAlertsQueue;
+}
 
-export const enrichWKOQueue = new Queue('enrichWKO', {
-  connection,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: { count: 200 },
-    removeOnFail: { count: 500 },
-  },
-});
-
-export const checkWhoisQueue = new Queue('checkWhois', {
-  connection,
-  defaultJobOptions: {
-    attempts: 2,
-    backoff: { type: 'fixed', delay: 15000 },
-    removeOnComplete: { count: 500 },
-    removeOnFail: { count: 1000 },
-  },
-});
-
-export const scoreDomainQueue = new Queue('scoreDomain', {
-  connection,
-  defaultJobOptions: {
-    attempts: 2,
-    backoff: { type: 'fixed', delay: 10000 },
-    removeOnComplete: { count: 500 },
-    removeOnFail: { count: 500 },
-  },
-});
-
-export const sendAlertsQueue = new Queue('sendAlerts', {
-  connection,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 3000 },
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 200 },
-  },
-});
+// Backwards-compatible exports
+export const scrapeEdiktsdateiQueue = { get add() { return getScrapeEdiktsdateiQueue().add.bind(getScrapeEdiktsdateiQueue()); }, get upsertJobScheduler() { return getScrapeEdiktsdateiQueue().upsertJobScheduler.bind(getScrapeEdiktsdateiQueue()); } } as unknown as Queue;
+export const scrapeGISAQueue = { get add() { return getScrapeGISAQueue().add.bind(getScrapeGISAQueue()); }, get upsertJobScheduler() { return getScrapeGISAQueue().upsertJobScheduler.bind(getScrapeGISAQueue()); } } as unknown as Queue;
+export const enrichWKOQueue = { get add() { return getEnrichWKOQueue().add.bind(getEnrichWKOQueue()); }, get upsertJobScheduler() { return getEnrichWKOQueue().upsertJobScheduler.bind(getEnrichWKOQueue()); } } as unknown as Queue;
+export const checkWhoisQueue = { get add() { return getCheckWhoisQueue().add.bind(getCheckWhoisQueue()); }, get upsertJobScheduler() { return getCheckWhoisQueue().upsertJobScheduler.bind(getCheckWhoisQueue()); } } as unknown as Queue;
+export const scoreDomainQueue = { get add() { return getScoreDomainQueue().add.bind(getScoreDomainQueue()); }, get upsertJobScheduler() { return getScoreDomainQueue().upsertJobScheduler.bind(getScoreDomainQueue()); } } as unknown as Queue;
+export const sendAlertsQueue = { get add() { return getSendAlertsQueue().add.bind(getSendAlertsQueue()); }, get upsertJobScheduler() { return getSendAlertsQueue().upsertJobScheduler.bind(getSendAlertsQueue()); } } as unknown as Queue;
 
 // --- Scheduler setup ---
 
 export async function setupScheduler(): Promise<void> {
-  // scrapeEdiktsdatei: daily at 08:00 CET
-  await scrapeEdiktsdateiQueue.upsertJobScheduler(
+  await getScrapeEdiktsdateiQueue().upsertJobScheduler(
     'scrapeEdiktsdatei-daily',
-    {
-      pattern: '0 8 * * *',
-      tz: 'Europe/Vienna',
-    },
-    {
-      name: 'scrapeEdiktsdatei',
-      data: {},
-    }
+    { pattern: '0 8 * * *', tz: 'Europe/Vienna' },
+    { name: 'scrapeEdiktsdatei', data: {} }
   );
 
-  // scrapeGISA: weekly Sunday at 02:00 CET
-  await scrapeGISAQueue.upsertJobScheduler(
+  await getScrapeGISAQueue().upsertJobScheduler(
     'scrapeGISA-weekly',
-    {
-      pattern: '0 2 * * 0',
-      tz: 'Europe/Vienna',
-    },
-    {
-      name: 'scrapeGISA',
-      data: {},
-    }
+    { pattern: '0 2 * * 0', tz: 'Europe/Vienna' },
+    { name: 'scrapeGISA', data: {} }
   );
 
-  // checkWhois: every 6 hours
-  await checkWhoisQueue.upsertJobScheduler(
+  await getCheckWhoisQueue().upsertJobScheduler(
     'checkWhois-periodic',
-    {
-      pattern: '0 */6 * * *',
-      tz: 'Europe/Vienna',
-    },
-    {
-      name: 'checkWhois',
-      data: {},
-    }
+    { pattern: '0 */6 * * *', tz: 'Europe/Vienna' },
+    { name: 'checkWhois', data: {} }
   );
 
-  // scoreDomain: every 12 hours
-  await scoreDomainQueue.upsertJobScheduler(
+  await getScoreDomainQueue().upsertJobScheduler(
     'scoreDomain-periodic',
-    {
-      pattern: '0 */12 * * *',
-      tz: 'Europe/Vienna',
-    },
-    {
-      name: 'scoreDomain',
-      data: {},
-    }
+    { pattern: '0 */12 * * *', tz: 'Europe/Vienna' },
+    { name: 'scoreDomain', data: {} }
   );
 
-  // sendAlerts: every 30 minutes
-  await sendAlertsQueue.upsertJobScheduler(
+  await getSendAlertsQueue().upsertJobScheduler(
     'sendAlerts-periodic',
-    {
-      pattern: '*/30 * * * *',
-      tz: 'Europe/Vienna',
-    },
-    {
-      name: 'sendAlerts',
-      data: {},
-    }
+    { pattern: '*/30 * * * *', tz: 'Europe/Vienna' },
+    { name: 'sendAlerts', data: {} }
   );
 
   console.log('Job schedulers configured successfully');
 }
 
-export { connection as redisConnection };
+export { getConnection as getRedisConnection };
